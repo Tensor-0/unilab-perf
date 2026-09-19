@@ -14,6 +14,9 @@
 - **`mjwarp` 不要用**：物理快 1.77 倍，但 reset 期模型 DR 调的
   `mujoco_warp.set_const` 每次固定 5.4 ms，全吃回去（根因是 399 次 kernel 发射，
   **与 env 数无关**）
+- 给 UniLab 补了 `startup` 模式把上面那 5.4 ms 降到 0，mjwarp 从 0.86× 变 **1.30×**；
+  但 3000 轮 A/B 里 startup 组 reward 落后 ~20%（一个 seed，未定论）
+  ⇒ **代码保留、默认值撤回**
 
 细节和全部数据在 [docs/findings.md](docs/findings.md)。
 
@@ -63,6 +66,7 @@ export UNILAB_ROOT=$HOME/UniLab
 | `scripts/mjwarp_setconst_issue_evidence.py` | `set_const` 的 399 次发射拆解 + graph 对照（上游 issue 素材） |
 | `scripts/mjwarp_setconst_capture_correctness.py` | 验证捕获成 CUDA graph 后数值是否还正确（含正对照） |
 | `scripts/warp_launch_overhead_control.py` | 对照：零成本 kernel 的纯发射开销（8.4 µs/次） |
+| `scripts/compare_train_curves.py` | 比两次训练的 reward 曲线，出十分位表（**别用 `run_summary.json` 的 `best_*` 判质量**） |
 
 `percore.py` 只用标准库。其余通过 `uv run --project $UNILAB_ROOT` 跑，所以能 import 到 UniLab 的依赖。
 

@@ -11,6 +11,9 @@
 2. **`mjwarp`（GPU 物理）在 dm10 上不要用** —— 物理确实快 1.77 倍，
    但 reset 期的模型域随机化要调 `mujoco_warp.set_const`，每次固定 5.4 ms，全吃回去。
    根因是 399 次 kernel 发射，且**与 env 数无关**。
+   已给 UniLab 补上 `startup` 模式把它降到 0（mjwarp 从 0.86× 变 **1.30×**），
+   但 **3000 轮 A/B 里 startup 组的 reward 曲线落后 ~20%，一个 seed、未定论** ⇒
+   **代码保留、默认值撤回**。详见 mjwarp 一节。
 
 2026-09-19 / 09-20 测的。DM10（双足 10 自由度）/ UniLab + MuJoCo / PPO / 512 envs / 物理跑 CPU。
 机器：ROG G16 GU605MV，Core Ultra 9 185H（16 物理核 22 逻辑核），RTX 4060 Laptop 8G。
@@ -288,22 +291,85 @@ reset 期 DR 改掉了 `body_ipos` / `dof_armature`，而 `body_invweight0` 依�
 **修法：每个测试都用【当场的】eager 调用作参照，绝不用早先存的快照。**
 改完之后全 0。
 
-### 正解不是砍 DR，是 startup 模式
+### 正解是 startup 模式 —— 已实现，但训练质量没验出来
 
-UniLab 支持 `mode: "startup"`（`EventMode = Literal["startup","reset","interval","step"]`），
-但**模型类 DR term 把 mode 硬锁在 `reset`**：
+mjlab 文档给的正解是 `startup` 模式：这些字段**初始化抽一次**，不每 episode 重抽。
+UniLab 的 `EventMode` 里本来就有 `"startup"`，但模型类 DR term 把 mode **硬锁在 `reset`**：
 
 ```
 NotImplementedError: EventManager term 'randomize_rigid_body_mass'
                       only supports mode='reset' on the UniLab runtime
 ```
 
-（`src/unilab/envs/mdp/events.py:233` 的 `_validate_event_term`）
+放开它只需要改校验，但**真让它跑起来撞了两堵墙**：
 
-startup 模式下 `set_const` 只在 init 调一次；2048 envs 仍是 2048 套独立参数，
-DR 分布不损失，只是同一 env 跨 episode 不再重抽。这正是 mjlab 文档的推荐做法。
+1. 原地 `apply(mode="startup")` 写不进模型字段 —— 写入要求事务 active
+   （`reset_state.py:1519`），报 `requires an active reset event`
+2. 包了事务还不够：保持原顺序（startup → materialize）时 mujoco 直接崩
+   `'NoneType' object has no attribute 'reset'` —— `materialize()` 才建线程池。
+   ⇒ 时序契约必须从 `startup → materialize` 反过来
 
-**⇒ 下一步该做的是给 UniLab 补 startup 支持，而不是砍掉 DR。**
+#### 已验证的（这部分可信）
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 每个 env 独立随机值 | — | ✅ env0=8.225 / env1=5.019 |
+| `set_const` 调用 | 195 / 200 步 | **0**（只在 init 一次） |
+| `reset_done` @2048 | 9.59 ms | **3.54 ms** |
+| benchmark @2048 | 102,320 | **148,608** steps/s |
+| 真实训练 @2048（60 轮） | CPU 68,364 | mjwarp **88,770 = 1.30×** |
+| mujoco 兼容 | — | reset 档 136 次写/218 reset 不变 |
+| 回归 | — | 无（基线 24 失败 vs 改后 24 失败，集合完全相同） |
+
+#### ⚠️ 没验证出来的：3000 轮 A/B
+
+A = startup / B = reset，mjwarp @512，各 3000 轮：
+
+| 指标 | A | B | A/B |
+|---|---|---|---|
+| wall（A 快 1.31×） | 1100 s | 1441 s | 0.763 |
+| `best_mean_reward` | 93.12 | 94.92 | **0.981** |
+| `Train/mean_reward` max | 73.56 | 86.57 | **0.850** |
+| 末值 | 59.40 | 70.17 | **0.847** |
+| 全程均值 | 35.94 | 44.41 | **0.809** |
+
+十分位曲线，**10 个十分位里 9 个落后**（只有开头 0-300 轮 startup 领先）：
+
+```
+   0- 300   11.18    9.26   1.207   ← 只有开头领先
+ 300- 600   36.48   37.46   0.974
+ 600- 900   37.09   44.82   0.828   ← 从这里开始
+ 900-1200   37.66   50.16   0.751
+1200-1500   38.47   51.36   0.749
+1500-1800   39.56   51.19   0.773
+1800-2100   37.75   51.99   0.726
+2100-2400   39.10   49.61   0.788
+2400-2700   41.77   45.73   0.913
+2700-3000   40.31   52.51   0.768
+```
+
+**但这不足以定罪**：n=1/arm，两臂 RNG 流不同源（DR 抽样时机不同 ⇒ 从早期就发散），
+**不是配对比较**；RL 跨 seed 方差通常远大于此。
+
+**一个指向"测试设计"的机制解释**：reset 模式下同一 env 每 episode 换一副身体，
+等价于**持续的数据增强**；startup 下 512 envs 全程只有 512 套动力学。
+策略观测里没有质量/质心，必须对全部动力学鲁棒 ⇒ 池子小了就是更难。
+**mjlab 建议的前提正是 4k+ envs —— 选 512 是想保守，但保守的方向恰好可能制造了人造劣势。**
+
+#### ⚠️ 顺带一个判据自坑
+
+我事前定的判据是「`best_mean_reward` ≥ 90%」，结果 0.981，判"通过"。
+然后才发现**同一次训练有四个口径，三个说失败**，而我挑中了唯一说通过的那个
+（`best_*` 是最平滑、最容易被"曾经有过一个好窗口"拉平的）。
+曲线一看就明白不是噪声形状。
+
+⇒ **判据要用 `Train/mean_reward` 的逐迭代原始序列（十分位/滑窗），
+不要用 `run_summary.json` 里任何 `best_*`。**
+
+#### 当前状态
+
+**代码能力保留，yaml 默认值撤回**（`dm10_joystick_flat/mjwarp.yaml` 恢复 `reset`）。
+下一步是先在 2048 envs 上跑 A/B 验证「512 太小」这个假设 —— 它决定了是继续还是废弃。
 
 ---
 
@@ -390,7 +456,8 @@ PGS 模型直接抛 `NotImplementedError: mjSOL_PGS is unsupported`。
 
 - `torch.compile` 没做 A/B
 - 并行跑多条 run 没试（本来以为 2026-09-18 那次崩溃说明并行不稳，后来查明是系统休眠杀的进程，和并行无关）
-- **给 UniLab 补 `startup` 模式的模型 DR** —— 目前只支持 `reset`，这是切 mjwarp 的前置条件
+- **2048 envs 上的 startup A/B** —— 验证「512 envs 太小」这个假设，它决定 startup 模式是继续还是废弃
+- startup 模式的种子扫描（若 2048 上差距仍在）
 - mjwarp 上的长训练（>250 轮）没跑，没看最终步态质量
 - `set_const` 那两个嵌套循环的修法（上游 TODO）没验证能省多少
 
