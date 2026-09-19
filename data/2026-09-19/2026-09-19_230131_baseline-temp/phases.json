@@ -1,0 +1,99 @@
+{
+  "run_dir": "$UNILAB_ROOT/logs/rsl_rl_ppo/DM10JoystickFlat/2026-09-19_23-01-34_mujoco",
+  "run_name": "2026-09-19_23-01-34_mujoco",
+  "config": {
+    "device": "cuda",
+    "num_envs": 512,
+    "max_iterations": 250,
+    "num_steps_per_env": 24,
+    "sim_backend": "mujoco"
+  },
+  "summary": {
+    "status": "completed",
+    "completed_iterations": 249,
+    "total_env_steps": 3072000,
+    "training_throughput_env_steps_per_sec": 25731.134974897454,
+    "training_wall_time_sec": 123.34005951881409,
+    "final_mean_reward": 28.558079034686088,
+    "last_checkpoint": "$UNILAB_ROOT/logs/rsl_rl_ppo/DM10JoystickFlat/2026-09-19_23-01-34_mujoco/model_249.pt"
+  },
+  "scalars": {
+    "Episode_Termination/time_out": {
+      "n": 136,
+      "mean": 0.09761801504475229,
+      "min": 0.0,
+      "max": 1.2307692766189575,
+      "last": 0.6666666865348816
+    },
+    "Episode_Termination/bad_orientation": {
+      "n": 136,
+      "mean": 4.396870665526127,
+      "min": 0.0833333358168602,
+      "max": 12.875,
+      "last": 0.3333333432674408
+    },
+    "Loss/value": {
+      "n": 250,
+      "mean": 0.2979871221445501,
+      "min": 0.011509513482451439,
+      "max": 5.899343967437744,
+      "last": 2.581960916519165
+    },
+    "Loss/surrogate": {
+      "n": 250,
+      "mean": -0.009131264740601181,
+      "min": -0.012796135619282722,
+      "max": -0.004601067863404751,
+      "last": -0.006672120187431574
+    },
+    "Loss/entropy": {
+      "n": 250,
+      "mean": 5.446596146583557,
+      "min": 3.6154768466949463,
+      "max": 7.263070106506348,
+      "last": 3.6154768466949463
+    },
+    "Loss/learning_rate": {
+      "n": 250,
+      "mean": 8.544093849195633e-05,
+      "min": 9.999999747378752e-06,
+      "max": 0.00038443360244855285,
+      "last": 0.00017085937724914402
+    },
+    "Perf/total_fps": {
+      "n": 250,
+      "mean": 25910.796,
+      "min": 17597.0,
+      "max": 34805.0,
+      "last": 26198.0
+    },
+    "Perf/collection_time": {
+      "n": 250,
+      "mean": 0.41048837566375734,
+      "min": 0.2872292995452881,
+      "max": 0.5272417068481445,
+      "last": 0.40401363372802734
+    },
+    "Perf/learning_time": {
+      "n": 250,
+      "mean": 0.06706537437438966,
+      "min": 0.06071162223815918,
+      "max": 0.17102980613708496,
+      "last": 0.06501626968383789
+    },
+    "Train/mean_reward": {
+      "n": 250,
+      "mean": 7.524638283275068,
+      "min": -2.9333243370056152,
+      "max": 28.55807876586914,
+      "last": 28.55807876586914
+    },
+    "Train/mean_reward/time": {
+      "n": 250,
+      "mean": 7.524638283275068,
+      "min": -2.9333243370056152,
+      "max": 28.55807876586914,
+      "last": 28.55807876586914
+    }
+  }
+}
