@@ -4,10 +4,15 @@
 剩下 28.7% 是三块串行代码，全消掉也就 1.4 倍。
 另外推翻了四个听起来合理但实测没用的优化方向。**
 
-**但最后找到一条真的：把 MJCF 里的 solver 从 PGS 换成 Newton，真实训练快 1.64 倍
-（纯物理计算量少 3.3 倍）。改动只有一个 XML 属性。见文末。**
+**找到两条真的：**
 
-2026-09-19 测的。DM10（双足 10 自由度）/ UniLab + MuJoCo / PPO / 512 envs / 物理跑 CPU。
+1. **把 MJCF 里的 solver 从 PGS 换成 Newton**，真实训练快 **1.64 倍**（纯物理计算量少 3.3 倍）。
+   改动只有一个 XML 属性。
+2. **`mjwarp`（GPU 物理）在 dm10 上不要用** —— 物理确实快 1.77 倍，
+   但 reset 期的模型域随机化要调 `mujoco_warp.set_const`，每次固定 5.4 ms，全吃回去。
+   根因是 399 次 kernel 发射，且**与 env 数无关**。
+
+2026-09-19 / 09-20 测的。DM10（双足 10 自由度）/ UniLab + MuJoCo / PPO / 512 envs / 物理跑 CPU。
 机器：ROG G16 GU605MV，Core Ultra 9 185H（16 物理核 22 逻辑核），RTX 4060 Laptop 8G。
 
 ---
@@ -190,23 +195,115 @@ RL 训练里策略一直在更新，机器人姿态、接触状态就一直在�
 
 ---
 
-## mjwarp 的预期收益
+## mjwarp 实测：物理快 1.8 倍，被 reset 全吃掉
 
-（这节是换求解器之前算的，换完 Newton 后前提变了，见下一节。）
+2026-09-20 测的。**当前配置下不要切 mjwarp。**
 
-物理占一个控制步的 71.3%。如果 mjwarp 让物理快 3 倍：
+真实训练，同样的启动脚本（`env-steps/s`）：
+
+| 配置 | CPU+Newton | mjwarp | 比值 | EpLen (CPU / mjwarp) |
+|---|---|---|---|---|
+| 512 envs, DR 全开 | **41,747** | 36,014 | 0.86× | 359 / 477 |
+| 2048 envs, DR 全开 | 67,433 | 71,735 | 1.06× | 128 / 223 |
+| 2048 envs, 模型 DR 全关 | 70,054 | **100,388** | **1.43×** | 570 / 430 |
+| 2048 envs, 只留 foot_friction | 68,110 | **91,533** | **1.34×** | 429 / 608 |
+
+固定负载 benchmark（随机动作，两边 reset 次数接近），@2048：
 
 ```
-现在            0.713 + 0.287 = 1.000
-mjwarp 3x       0.713/3 + 0.287 = 0.525      加速 1.90x
-物理无限快       0.287                        上限 3.48x
+phase             CPU+Newton   mjwarp
+backend_step          13.48      7.62      <- 物理确实快 1.77x
+update_state           3.08      2.58
+reset_done             2.44      9.59      <- 全吃回去
+TOTAL                 19.31     20.02
 ```
 
-（早期估过 1.2-1.5 倍，那个数字用错了基数——当时拿的是一条 learner 跑在 CPU 上的 run，
-采集占比算成了 49%。）
+mjwarp 自身扩展性没问题（DR 全开）：512 → 2048 → 4096 =
+38,766 → 102,320 → 139,794 steps/s，8G 卡 4096 envs 也不 OOM。
 
-已知的坑没变：UniLab 官方只在 `g1_walk_flat` 上验证过 mjwarp；播放链路要改；
-要装 extra 加一行注册；8G 卡上实际能开多少 env 未知。
+### 根因
+
+```
+reset → _apply_reset_randomization → mujoco_warp.set_const(m, d)    ← 单次 5.4 ms
+```
+
+- **399 次 host 侧调用**（283 `wp.launch` + 100 `wp.launch_tiled` + 11 `wp.zeros` + …），
+  host 派发占墙钟 92%
+- **与 env 数无关**：nworld=64 和 nworld=512 都是 5.3 ms（命令条数不随规模变）
+- 热点是 mujoco_warp 自己的两个 Python 循环 —— `io.py:3405` 的 dof 循环、
+  `io.py:3425-3451` 的 body×row 嵌套循环（**上游自己挂着 `TODO(team)` 注释**）
+- 200 步里 195 步有 reset ⇒ 这 5.4 ms 是**按「每步」交的**，不是按 reset 次数
+
+哪个 DR term 触发它：
+
+| DR term | 走哪 | 代价 |
+|---|---|---|
+| `base_mass` / `base_com` | `set_const` | 5.4 ms |
+| `joint_armature` | `set_const_0` | 5.3 ms |
+| **`foot_friction`** | 只 upload，不重算 | **免费** |
+
+### 上游早就知道，但归因是错的
+
+mjlab 文档（`randomization.html`）写明：
+
+> All event manager logic, including `recompute_constants`, runs as regular Python
+> between these graph replays, **so it will not break graph capture**.
+> That said, **set_const is expensive** ... best randomized with **startup or reset** modes.
+
+mjlab #757 讨论过同一现象，维护者的建议是改用 `startup` 模式。
+
+**但文档对成本的归因和实测对不上** —— 它说贵是因为算得「across all worlds」，
+实测是**固定成本、与 world 数无关**。这是值得反馈给上游的一个更正。
+
+### 捕获成 CUDA graph：快 2.9x，且数值安全
+
+mjlab 说「不捕获是有意设计」。实测「如果捕获会怎样」：
+
+```
+eager 逐 kernel 发射    5.73 ms
+同一段 work 走 graph     2.00 ms   -> 2.87x
+```
+
+数值正确性，逐位比较：
+
+| 测试 | 结果 |
+|---|---|
+| 自对照 eager vs eager | 0.00e+00 |
+| 立即 replay | 0.00e+00 |
+| 经 60 步 `env.step`（内存 churn）后 replay | 0.00e+00 |
+| 同一输入连续 replay 两次 | 0.00e+00 |
+| churn 后重新捕获再 replay | 0.00e+00 |
+| **正对照：换一个扰动** | 2.04e-01（证明这个比较有分辨力）|
+
+### ⚠️ 这条实验的第一版是错的
+
+我拿「程序开头存的快照」当参照，跑出 `dof_invweight0` 差 17.6%、`body_invweight0` 差 8.3%。
+差点当成「捕获期分配的临时数组被回收 ⇒ 指针失效」发出去。
+
+**识别信号：测 2 和测 4 的差异数值一模一样**（3.801 / 2.215）。
+内存被复用导致的失效不可能这么确定 —— 真凶是中间那 60 步 `env.step` 的
+reset 期 DR 改掉了 `body_ipos` / `dof_armature`，而 `body_invweight0` 依赖前者、
+`dof_invweight0` 依赖后者。等于在比两个不同的模型状态。
+
+**修法：每个测试都用【当场的】eager 调用作参照，绝不用早先存的快照。**
+改完之后全 0。
+
+### 正解不是砍 DR，是 startup 模式
+
+UniLab 支持 `mode: "startup"`（`EventMode = Literal["startup","reset","interval","step"]`），
+但**模型类 DR term 把 mode 硬锁在 `reset`**：
+
+```
+NotImplementedError: EventManager term 'randomize_rigid_body_mass'
+                      only supports mode='reset' on the UniLab runtime
+```
+
+（`src/unilab/envs/mdp/events.py:233` 的 `_validate_event_term`）
+
+startup 模式下 `set_const` 只在 init 调一次；2048 envs 仍是 2048 套独立参数，
+DR 分布不损失，只是同一 env 跨 episode 不再重抽。这正是 mjlab 文档的推荐做法。
+
+**⇒ 下一步该做的是给 UniLab 补 startup 支持，而不是砍掉 DR。**
 
 ---
 
@@ -291,11 +388,11 @@ PGS 模型直接抛 `NotImplementedError: mjSOL_PGS is unsupported`。
 
 ## 没做的
 
-
-- `reset_done`（13.9%）没拆开看
 - `torch.compile` 没做 A/B
-- mjwarp 没实测
 - 并行跑多条 run 没试（本来以为 2026-09-18 那次崩溃说明并行不稳，后来查明是系统休眠杀的进程，和并行无关）
+- **给 UniLab 补 `startup` 模式的模型 DR** —— 目前只支持 `reset`，这是切 mjwarp 的前置条件
+- mjwarp 上的长训练（>250 轮）没跑，没看最终步态质量
+- `set_const` 那两个嵌套循环的修法（上游 TODO）没验证能省多少
 
 ---
 

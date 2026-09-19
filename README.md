@@ -5,11 +5,15 @@
 
 **它回答**：训练时那 22 个核在干什么、GPU 为什么闲着、时间花在哪一段。
 
-**已经用它得到的结论**（DM10 双足 / MuJoCo 物理跑 CPU / PPO / 512 envs）：
+**已经用它得到的结论**（DM10 双足 / MuJoCo / PPO / 512 envs）：
 
 - 物理仿真占一个控制步 **71.3%**，已跑 17.96 核，受限于内存带宽 —— 加核、提频都没用
 - 串行段 28.7%（`reset_done` 13.9% / `update_state` 13.4% / glue 1.4%）
 - 推翻了四个听起来合理的方向：钉 P 核、16 物理核甜点、热降频、`nan_guard` 拷贝
+- **换求解器** `PGS → Newton`，真实训练快 **1.64 倍**，改一个 XML 属性
+- **`mjwarp` 不要用**：物理快 1.77 倍，但 reset 期模型 DR 调的
+  `mujoco_warp.set_const` 每次固定 5.4 ms，全吃回去（根因是 399 次 kernel 发射，
+  **与 env 数无关**）
 
 细节和全部数据在 [docs/findings.md](docs/findings.md)。
 
@@ -54,6 +58,11 @@ export UNILAB_ROOT=$HOME/UniLab
 | `scripts/nan_guard_ab.py` | nan_guard 开关 A/B（固定动作，排除策略行为干扰） |
 | `scripts/update_state_breakdown.py` | 把 `update_state` 拆到各 manager |
 | `scripts/reward_breakdown.py` | 把 `reward.compute` 拆到各奖励项 |
+| `scripts/reset_breakdown.py` | 拆 `reset_done`（含「固定开销 + 每 env 边际」拟合） |
+| `scripts/mjwarp_reset_probe.py` | 运行时 monkeypatch 给 mjwarp 后端打点，**不改任何文件** |
+| `scripts/mjwarp_setconst_issue_evidence.py` | `set_const` 的 399 次发射拆解 + graph 对照（上游 issue 素材） |
+| `scripts/mjwarp_setconst_capture_correctness.py` | 验证捕获成 CUDA graph 后数值是否还正确（含正对照） |
+| `scripts/warp_launch_overhead_control.py` | 对照：零成本 kernel 的纯发射开销（8.4 µs/次） |
 
 `percore.py` 只用标准库。其余通过 `uv run --project $UNILAB_ROOT` 跑，所以能 import 到 UniLab 的依赖。
 
@@ -79,6 +88,14 @@ export UNILAB_ROOT=$HOME/UniLab
 **累积计数器要取增量。** `thermal_throttle/*_count` 是自开机累积的，直接读没意义，必须前后取差。
 
 **先量噪声底。** 训练指标噪声约 1.2%，env benchmark 单轮 4-13%。小于噪声底的差异不下结论。
+
+**参照必须是当场的，不能是早先存的快照。** 测 mjwarp 的 graph 捕获时，
+我拿程序开头的快照当参照，跑出 17.6% 的「差异」，差点当成 bug 报上去。
+真凶是中间那 60 步 `env.step` 的 reset 期 DR 改掉了 `body_ipos` / `dof_armature`，
+而 `body_invweight0` / `dof_invweight0` 依赖它们 —— 等于在比两个不同的模型状态。
+
+识别信号很明确：**两个独立测试给出了完全相同的差异数值**（3.801 / 2.215）。
+内存失效不可能是这么确定的。改成「每个测试都用当场的调用作参照」后全 0。
 
 ## 依赖
 
