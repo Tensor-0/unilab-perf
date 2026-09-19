@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(os.environ.get("UNILAB_ROOT", Path.home() / "UniLab")).resolve()
+os.chdir(REPO)
 # ^ UniLab 检出目录。脚本用 uv run --project $UNILAB_ROOT 跑，所以 import 得到 unilab/uni_rl。
 
 # 这些 prefix 的 scalar 收进 JSON；其余忽略（reward 明细等噪音太大）

@@ -37,6 +37,8 @@ from pathlib import Path
 
 REPO_ROOT = str(Path(os.environ.get("UNILAB_ROOT", Path.home() / "UniLab")).resolve())
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+# 模型路径在配置里是相对的（src/unilab/assets/...），所以必须切到检出目录
+os.chdir(REPO_ROOT)
 
 
 def build_env(num_envs: int, task: str, config_group: str):
