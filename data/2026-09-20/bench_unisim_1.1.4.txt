@@ -1,0 +1,21 @@
+### run 1
+pool nthread=22 num_envs=512 cpu_ids=None
+    backend_step      3.63     60.73  16.71   48.2
+    update_state      1.85      2.03   1.10   24.6
+      reset_done      1.86      2.63   1.41   24.7
+      TOTAL step      7.54     65.53   8.70  100.0
+steps/s=67943
+### run 2
+pool nthread=22 num_envs=512 cpu_ids=None
+    backend_step      3.63     60.23  16.59   47.8
+    update_state      1.88      1.80   0.96   24.7
+      reset_done      1.90      2.73   1.44   25.0
+      TOTAL step      7.59     65.13   8.58  100.0
+steps/s=67421
+### run 3
+pool nthread=22 num_envs=512 cpu_ids=None
+    backend_step      3.63     60.13  16.55   48.3
+    update_state      1.82      2.03   1.12   24.1
+      reset_done      1.88      2.60   1.38   25.0
+      TOTAL step      7.52     64.90   8.63  100.0
+steps/s=68069

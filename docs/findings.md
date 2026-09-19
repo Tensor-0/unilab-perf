@@ -4,7 +4,7 @@
 剩下 28.7% 是三块串行代码，全消掉也就 1.4 倍。
 另外推翻了四个听起来合理但实测没用的优化方向。**
 
-**找到两条真的：**
+**找到三条真的：**
 
 1. **把 MJCF 里的 solver 从 PGS 换成 Newton**，真实训练快 **1.64 倍**（纯物理计算量少 3.3 倍）。
    改动只有一个 XML 属性。
@@ -14,6 +14,8 @@
    已给 UniLab 补上 `startup` 模式把它降到 0（mjwarp 从 0.86× 变 **1.30×**），
    但 **3000 轮 A/B 里 startup 组的 reward 曲线落后 ~20%，一个 seed、未定论** ⇒
    **代码保留、默认值撤回**。详见 mjwarp 一节。
+3. **升级 `unisim-core` 1.1.4 → 1.7.2**：env 步进 **+14.2%**（没有任何代码优化，
+   纯粹是版本落后 6 个小版本）。但这是一次**原生层迁移**，不是改版本号。见文末。
 
 2026-09-19 / 09-20 测的。DM10（双足 10 自由度）/ UniLab + MuJoCo / PPO / 512 envs / 物理跑 CPU。
 机器：ROG G16 GU605MV，Core Ultra 9 185H（16 物理核 22 逻辑核），RTX 4060 Laptop 8G。
@@ -452,14 +454,79 @@ mjwarp 只支持 CG 和 NEWTON（`mujoco_warp/_src/types.py:496-498` 写着 `uns
 PGS 模型直接抛 `NotImplementedError: mjSOL_PGS is unsupported`。
 换 Newton 顺路把这个障碍清掉了。
 
+## 升级依赖：+14.2%，但这是原生层迁移不是改版本号
+
+`unisim-core` 停在 **1.1.4**（2026-09-08），PyPI 已到 **1.7.2**（09-19），
+上游 `origin/main` 已要求 `>=1.4.2` + `unilab-rl==1.2.1` + `mjbatch-uni~=0.2.1`。
+
+同一个 benchmark（512 envs / warmup 30 / 300 iters / 3+6 个独立进程）：
+
+| phase | 1.1.4 中位 | 1.7.2 中位 | 变化 | 核数 |
+|---|---|---|---|---|
+| backend_step | 3.63 | **3.08** | **−15.2%** | 16.59 → 19.37 |
+| update_state | 1.85 | **1.58** | **−14.3%** | 1.10 → 2.28 |
+| reset_done | 1.88 | **1.81** | −4.0% | 1.41 → 2.26 |
+| **TOTAL** | 7.54 | **6.60** | **−12.5%** | |
+| **steps/s** | 67,943 | **77,573** | **+14.2%** | |
+
+**两件事同时变好**：干得更少（各相都降 15%）+ 串行段并行更好（update_state 1.10 → 2.28 核）。
+
+机制对得上：1.7.2 的 `_sync_tracked_body_state` 已经是**批量版**
+（`self._pool.refresh_sensor_ranges(rows, …)`），逐 env ctypes 循环降级成 fallback；
+**1.1.4 里根本没有这个函数**。
+
+⚠️ 1.7.2 那组数据**分两簇**（~78k × 4 跑 / ~69k × 2 跑，极差 15.8%），而基线极差只有 1.0%。
+逐跑拆开看：慢的两跑**所有相位都慢（含 physics）**，物理核数 18.0 vs 19.3-19.8
+⇒ 是系统级波动，不是相位退化。
+**保守下界：最慢的 1.7.2 仍 +0.9% 于最快的 1.1.4。**
+
+### 代价：5 处断裂，其中 1 处是换原生层
+
+| # | 断在哪 | 性质 |
+|---|---|---|
+| 1 | `mujoco-uni-runtime 0.5.0` → **`mjbatch-uni 0.2.2`** | 批处理引擎换成 unilabsim 的 fork |
+| 2 | `unisim.dr.types` 删了 3 个符号，**语义也变了**（改 geom 尺寸 → 在整模型文件间选） | API 替换，不是改名 |
+| 3 | 所有后端删了 `apply_init_randomization` | 功能移除 |
+| 4 | `run_playback(extra_data_getter=…)` → `debug_overlay_getter`（返回 `DebugPrimitive`） | 签名 + 语义 |
+| 5 | isaacsim worker 删了私有 `_quat_rotate_wxyz` | 私有 |
+
+**测试影响**（同机同集合严格对照）：基线 25 失败 → 升级后 83，**净新增 61**。
+构成：28 个白盒测试戳后端私有属性（上游重构改了名）、22 个 genesis 后端能力边界、
+4 个 isaac 系依赖、2 个是我们自己的 shim、5 个报错文案/字段。
+**没有一个是 dm10 路径的功能回归** —— smoke / 250 轮训练 / 回放录像 / benchmark 全过。
+
+⚠️ **未验证**：多 free-joint 任务、terrain、多实体、motrix/genesis/isaac 系后端。
+那 28 个私有属性改名说明**上游重构过后端内部结构**，我们没跑过覆盖那些路径的任务。
+
+⚠️ **顺带一个语义变化**：1.1.4 没有 `_sync_tracked_body_state`，obs 传感器读数可能是
+**滞后一子步**的（和上游 1.4.0 同样的路径）。1.7.2 改成正确刷新。
+⇒ **换版本同时换了 obs 语义，带旧 checkpoint 上机前要确认。**
+
+## 试过但没用的：这次社区已经答了
+
+三个方向在动手之前先查了社区，三条独立线索把其中两个否掉：
+
+| 方向 | 结论 | 依据 |
+|---|---|---|
+| **多 run 并发** | **别做** | UniLab #1328：物理相 **~16 物理核就饱和**、瓶颈是内存带宽；#1340：host 相**与物理相严格时序依赖、不可 overlap**；tdmpc #25 作者：「stacking multiple training runs **will almost certainly slow down**」；IsaacLab #2989/#3902 维护者实测多实例**串行化**，有用户报告 3 个 trial **训练曲线完全相同**（结果串味）|
+| **采集/学习 overlap（APPO）** | 天花板 1.19×，消费级机器打平 | Sample Factory 官方：async 对 GPU 加速环境**无显著加速**；**UniLab #960：多 shard 在百核服务器 1.6–3.7×，消费级 32 线程机器只有 0.96–1.30×**；**UniLab #696：naive 2-worker 因 CPU 超订退化到 0.80×** |
+| **`torch.compile`** | **MLP 没收益** | rsl_rl PR #199 原话：「**MLP-only policies see no benefit**」——**dm10 就是 MLP**；UniLab #686 实测 compile worker 起 **847–862 个线程**抢物理核；FastTD3 README 建议「reproduce 不出来就关掉它」|
+
+（`overlap` 的 1.19× 是自己算的：采集 0.84 / 学习 0.16 ⇒ 完美流水线 `max(0.84, 0.16) = 0.84`。
+且 Sample Factory 那个 4× 主要来自"同步 PPO 的 batch 被 env 数绑死"，**我们的 PPO 用固定 minibatch，没有这个因素**。）
+
 ## 没做的
 
-- `torch.compile` 没做 A/B
-- 并行跑多条 run 没试（本来以为 2026-09-18 那次崩溃说明并行不稳，后来查明是系统休眠杀的进程，和并行无关）
 - **2048 envs 上的 startup A/B** —— 验证「512 envs 太小」这个假设，它决定 startup 模式是继续还是废弃
 - startup 模式的种子扫描（若 2048 上差距仍在）
 - mjwarp 上的长训练（>250 轮）没跑，没看最终步态质量
 - `set_const` 那两个嵌套循环的修法（上游 TODO）没验证能省多少
+- **升级后未验证的后端**：多 free-joint 任务、terrain、多实体、motrix / genesis / isaac 系
+  （那 28 个私有属性改名说明上游重构了后端内部结构）
+- **串行段并行化**（host 相 52% 墙钟 / 单线程）—— 唯一还没被社区否掉的方向，
+  但 UniLab #960 说消费级机器多 shard 只到 1.30×，天花板不高
+
+（这几个方向已经**不用再试了**，社区有实测：多 run 并发、APPO overlap、`torch.compile` 见上一节。）
 
 ---
 

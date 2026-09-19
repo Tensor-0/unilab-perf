@@ -17,6 +17,11 @@
 - 给 UniLab 补了 `startup` 模式把上面那 5.4 ms 降到 0，mjwarp 从 0.86× 变 **1.30×**；
   但 3000 轮 A/B 里 startup 组 reward 落后 ~20%（一个 seed，未定论）
   ⇒ **代码保留、默认值撤回**
+- **升级 `unisim-core` 1.1.4 → 1.7.2：+14.2%**（env 步进）。
+  纯粹是版本落后 6 个小版本，没有一行代码优化。但代价是一次**原生层迁移**
+  （批处理引擎换成 `mjbatch-uni`、4 处 API 断裂），不是改版本号
+- 三个方向**动手前先查了社区，结果是别做**：多 run 并发、APPO overlap（天花板 1.19×）、
+  `torch.compile`（rsl_rl 原话「MLP-only policies see no benefit」）
 
 细节和全部数据在 [docs/findings.md](docs/findings.md)。
 
